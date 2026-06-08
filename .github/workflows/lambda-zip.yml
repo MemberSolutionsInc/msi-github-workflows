@@ -1,0 +1,148 @@
+name: Lambda ZIP Deploy CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Service name
+        required: true
+        type: string
+      environment:
+        description: Target deployment environment
+        required: true
+        type: string
+      sonar-project-key:
+        description: SonarQube project key
+        required: true
+        type: string
+      function-name:
+        description: Lambda function name (defaults to service-name)
+        required: false
+        type: string
+        default: ''
+      aws-region:
+        description: AWS region
+        required: false
+        type: string
+        default: us-east-1
+      source-path:
+        description: Directory to package as ZIP
+        required: false
+        type: string
+        default: .
+      python-version:
+        description: Python version
+        required: false
+        type: string
+        default: '3.12'
+      s3-reports-bucket:
+        description: S3 bucket for scan reports (audit account)
+        required: false
+        type: string
+        default: msi-security-scan-reports
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+concurrency:
+  group: deploy-${{ inputs.service-name }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: Secret scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/secret-scan@main
+      - name: SonarQube scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/sonarqube-scan@main
+        with:
+          sonar-project-key: ${{ inputs.sonar-project-key }}
+          app-type: python
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Semgrep SAST
+        uses: membersolutionsinc/msi-github-actions/.github/actions/semgrep-sast@main
+        with:
+          config: p/python
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: pip-audit SCA
+        shell: bash
+        run: |
+          pip install pip-audit --quiet
+          pip-audit -r requirements.txt --format json --output pip-audit-report.json || true
+      - name: Upload pip-audit artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pip-audit-report-${{ github.run_id }}
+          path: pip-audit-report.json
+      - name: Upload pip-audit to S3
+        uses: membersolutionsinc/msi-github-actions/.github/actions/upload-scan-report@main
+        if: always()
+        with:
+          report-path: pip-audit-report.json
+          report-type: pip-audit
+          service-name: ${{ inputs.service-name }}
+          bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  deploy:
+    name: Deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: Deploy Lambda ZIP
+        uses: membersolutionsinc/msi-github-actions/.github/actions/lambda-zip-deploy@main
+        with:
+          function-name: ${{ inputs.function-name != '' && inputs.function-name || inputs.service-name }}
+          aws-region: ${{ inputs.aws-region }}
+          source-path: ${{ inputs.source-path }}

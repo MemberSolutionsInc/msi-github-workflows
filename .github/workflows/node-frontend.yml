@@ -1,0 +1,170 @@
+name: Node.js Frontend CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Service name (used as ECR repo name)
+        required: true
+        type: string
+      environment:
+        description: Target deployment environment
+        required: true
+        type: string
+      sonar-project-key:
+        description: SonarQube project key
+        required: true
+        type: string
+      aws-region:
+        description: AWS region
+        required: false
+        type: string
+        default: us-east-1
+      node-version:
+        description: Node.js version
+        required: false
+        type: string
+        default: '20.x'
+      working-directory:
+        description: Directory containing package.json
+        required: false
+        type: string
+        default: '.'
+      build-command:
+        description: Build script to run
+        required: false
+        type: string
+        default: 'npm run build'
+      s3-reports-bucket:
+        description: S3 bucket for scan reports (audit account)
+        required: false
+        type: string
+        default: msi-security-scan-reports
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+concurrency:
+  group: deploy-${{ inputs.service-name }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: Secret scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/secret-scan@main
+      - name: SonarQube scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/sonarqube-scan@main
+        with:
+          sonar-project-key: ${{ inputs.sonar-project-key }}
+          app-type: node
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Semgrep SAST
+        uses: membersolutionsinc/msi-github-actions/.github/actions/semgrep-sast@main
+        with:
+          config: p/javascript
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Install dependencies (for npm audit)
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+      - name: npm audit
+        uses: membersolutionsinc/msi-github-actions/.github/actions/npm-audit@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: membersolutionsinc/msi-github-actions/.github/actions/node-build@main
+        with:
+          node-version: ${{ inputs.node-version }}
+          working-directory: ${{ inputs.working-directory }}
+          build-command: ${{ inputs.build-command }}
+
+  build-and-push-image:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-tag: ${{ steps.push.outputs.image-tag }}
+      full-image-uri: ${{ steps.push.outputs.full-image-uri }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: Push to ECR
+        id: push
+        uses: membersolutionsinc/msi-github-actions/.github/actions/ecr-push@main
+        with:
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws-region: ${{ inputs.aws-region }}
+          image-name: ${{ inputs.service-name }}
+      - name: Attach SBOM
+        uses: membersolutionsinc/msi-github-actions/.github/actions/sbom-attach@main
+        with:
+          image-uri: ${{ steps.push.outputs.full-image-uri }}
+          service-name: ${{ inputs.service-name }}
+          image-tag: ${{ steps.push.outputs.image-tag }}
+
+  deploy:
+    name: Deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    needs: build-and-push-image
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: GitOps ECS update
+        uses: membersolutionsinc/msi-github-actions/.github/actions/gitops-ecs-update@main
+        with:
+          service-name: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+          image-tag: ${{ needs.build-and-push-image.outputs.image-tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

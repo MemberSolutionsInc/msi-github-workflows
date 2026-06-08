@@ -1,0 +1,182 @@
+name: Security Scheduled Scan
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Service name (used in scan report labels and S3 paths)
+        required: true
+        type: string
+      sonar-project-key:
+        description: SonarQube project key
+        required: true
+        type: string
+      app-type:
+        description: Application type for SCA scans (dotnet, node, python)
+        required: true
+        type: string
+      aws-account-id:
+        description: AWS account ID of the calling service (for OIDC role assumption)
+        required: true
+        type: string
+      aws-region:
+        description: AWS region
+        required: false
+        type: string
+        default: us-east-1
+      s3-reports-bucket:
+        description: S3 bucket for scan reports (audit account)
+        required: false
+        type: string
+        default: msi-security-scan-reports
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+  schedule:
+    - cron: '0 8 * * 1'
+
+concurrency:
+  group: security-scheduled-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog full scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/secret-scan@main
+        with:
+          only-verified: 'false'
+
+  sonarqube-scan:
+    name: SonarQube SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: SonarQube scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/sonarqube-scan@main
+        with:
+          sonar-project-key: ${{ inputs.sonar-project-key }}
+          app-type: ${{ inputs.app-type }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  semgrep-scan:
+    name: Semgrep SAST Report
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: Semgrep scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/semgrep-sast@main
+        with:
+          config: >-
+            ${{ inputs.app-type == 'dotnet' && 'p/csharp' ||
+                inputs.app-type == 'node' && 'p/javascript' ||
+                'p/python' }}
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+
+  sca-dotnet:
+    name: SCA — .NET
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: inputs.app-type == 'dotnet'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: OWASP Dependency Check
+        uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-vuln-scan@main
+        with:
+          project-name: ${{ inputs.service-name }}
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+
+  sca-node:
+    name: SCA — Node
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: inputs.app-type == 'node'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      - run: npm ci
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: npm audit
+        uses: membersolutionsinc/msi-github-actions/.github/actions/npm-audit@main
+        with:
+          audit-level: moderate
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}
+
+  sca-python:
+    name: SCA — Python
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: inputs.app-type == 'python'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/github-actions-terraform
+          aws-region: ${{ inputs.aws-region }}
+      - name: pip-audit
+        shell: bash
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --format json --output pip-audit-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+      - name: Upload to S3
+        uses: membersolutionsinc/msi-github-actions/.github/actions/upload-scan-report@main
+        if: always()
+        with:
+          report-path: pip-audit-report.json
+          report-type: pip-audit
+          service-name: ${{ inputs.service-name }}
+          bucket: ${{ inputs.s3-reports-bucket }}
+          aws-region: ${{ inputs.aws-region }}

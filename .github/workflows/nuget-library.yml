@@ -1,0 +1,120 @@
+name: NuGet Library CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: Package/service name
+        required: true
+        type: string
+      sonar-project-key:
+        description: SonarQube project key
+        required: true
+        type: string
+      dotnet-version:
+        description: .NET SDK version
+        required: false
+        type: string
+        default: '8.x'
+      project-path:
+        description: Path to the .csproj to build and pack
+        required: false
+        type: string
+        default: '.'
+      version:
+        description: Package version (defaults to run number)
+        required: false
+        type: string
+        default: '0.0.${{ github.run_number }}'
+      s3-reports-bucket:
+        description: S3 bucket for scan reports (audit account)
+        required: false
+        type: string
+        default: msi-security-scan-reports
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-terraform
+          aws-region: us-east-1
+      - name: Secret scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/secret-scan@main
+      - name: SonarQube scan
+        uses: membersolutionsinc/msi-github-actions/.github/actions/sonarqube-scan@main
+        with:
+          sonar-project-key: ${{ inputs.sonar-project-key }}
+          app-type: dotnet
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Semgrep SAST
+        uses: membersolutionsinc/msi-github-actions/.github/actions/semgrep-sast@main
+        with:
+          config: p/csharp
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+      - name: OWASP Dependency Check
+        uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-vuln-scan@main
+        with:
+          project-name: ${{ inputs.service-name }}
+          service-name: ${{ inputs.service-name }}
+          s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
+
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-build@main
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+          project-path: ${{ inputs.project-path }}
+      - name: Test
+        uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-test@main
+        with:
+          project-path: ${{ inputs.project-path }}
+
+  publish:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-build@main
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+          project-path: ${{ inputs.project-path }}
+      - name: Push to GitHub Packages
+        uses: membersolutionsinc/msi-github-actions/.github/actions/nuget-push@main
+        with:
+          project-path: ${{ inputs.project-path }}
+          version: ${{ inputs.version }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
