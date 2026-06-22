@@ -55,6 +55,9 @@ on:
       NUGET_TOKEN:
         description: PAT for private NuGet feeds (optional — only needed for services using private packages)
         required: false
+      NVD_API_KEY:
+        description: NVD API key for OWASP Dependency Check (required for DependencyCheck v9+). Get a free key at https://nvd.nist.gov/developers/request-an-api-key
+        required: false
 
 concurrency:
   group: deploy-${{ inputs.service-name }}-${{ inputs.environment }}
@@ -100,6 +103,7 @@ jobs:
           service-name: ${{ inputs.service-name }}
           s3-reports-bucket: ${{ inputs.s3-reports-bucket }}
           aws-region: ${{ inputs.aws-region }}
+          nvd-api-key: ${{ secrets.NVD_API_KEY }}
 
   build-and-test:
     name: Build & Test
