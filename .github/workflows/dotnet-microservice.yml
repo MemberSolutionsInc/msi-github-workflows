@@ -81,6 +81,9 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
       - name: Secret scan
         uses: membersolutionsinc/msi-github-actions/.github/actions/secret-scan@main
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: SonarQube scan
         uses: membersolutionsinc/msi-github-actions/.github/actions/sonarqube-scan@main
         with:
