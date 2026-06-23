@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: ''
+      iac-repo:
+        description: IaC repository in org/repo format (defaults to MemberSolutionsInc/Multicloud-MS-Terraform)
+        required: false
+        type: string
+        default: 'MemberSolutionsInc/Multicloud-MS-Terraform'
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -191,5 +196,6 @@ jobs:
           environment: ${{ inputs.environment }}
           image-tag: ${{ needs.build-and-push-image.outputs.image-tag }}
           vars-yaml-path: ${{ inputs.vars-yaml-path }}
+          iac-repo: ${{ inputs.iac-repo }}
         env:
           GITHUB_TOKEN: ${{ secrets.ORG_PAT || secrets.GITHUB_TOKEN }}
