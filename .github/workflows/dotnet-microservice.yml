@@ -63,6 +63,9 @@ on:
       NVD_API_KEY:
         description: NVD API key for OWASP Dependency Check (required for DependencyCheck v9+). Get a free key at https://nvd.nist.gov/developers/request-an-api-key
         required: false
+      ORG_PAT:
+        description: GitHub PAT with write access to terraform-infra (required for GitOps deploy)
+        required: false
 
 concurrency:
   group: deploy-${{ inputs.service-name }}-${{ inputs.environment }}
@@ -189,4 +192,4 @@ jobs:
           image-tag: ${{ needs.build-and-push-image.outputs.image-tag }}
           vars-yaml-path: ${{ inputs.vars-yaml-path }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ORG_PAT }}
