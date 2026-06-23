@@ -30,6 +30,11 @@ on:
         required: false
         type: string
         default: '.'
+      test-filter:
+        description: dotnet test --filter expression to exclude tests (e.g. "Category!=Integration"). Leave empty to run all tests.
+        required: false
+        type: string
+        default: ''
       dockerfile:
         description: Path to Dockerfile
         required: false
@@ -124,6 +129,7 @@ jobs:
         uses: membersolutionsinc/msi-github-actions/.github/actions/dotnet-test@main
         with:
           project-path: ${{ inputs.project-path }}
+          filter: ${{ inputs.test-filter }}
 
   build-and-push-image:
     name: Build & Push Image
